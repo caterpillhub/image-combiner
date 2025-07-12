@@ -251,7 +251,7 @@ async def create_download_package(request: DownloadRequest):
         
         # Create temporary directory for the package
         temp_dir = tempfile.mkdtemp()
-        package_dir = os.path.join(temp_dir, "ImageCombiner")
+        package_dir = os.path.join(temp_dir, "ImagePack")
         os.makedirs(package_dir, exist_ok=True)
         
         # Write files to package
@@ -313,7 +313,7 @@ async def download_package(download_id: str):
         return FileResponse(
             zip_path,
             media_type="application/zip",
-            filename=f"ImageCombiner_{download_id}.zip"
+            filename=f"ImagePack_{download_id}.zip"
         )
         
     except HTTPException:
