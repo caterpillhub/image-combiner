@@ -250,9 +250,11 @@ async def create_download_package(request: DownloadRequest):
         download_id = str(uuid.uuid4())
         
         # Create temporary directory for the package
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp(prefix="imagepack_")
         package_dir = os.path.join(temp_dir, "ImagePack")
         os.makedirs(package_dir, exist_ok=True)
+        
+        logger.info(f"Created temp directory: {temp_dir}")
         
         # Write files to package
         files_to_create = {
@@ -262,12 +264,24 @@ async def create_download_package(request: DownloadRequest):
         }
         
         for filename, content in files_to_create.items():
-            with open(os.path.join(package_dir, filename), 'w') as f:
+            file_path = os.path.join(package_dir, filename)
+            with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
+            logger.info(f"Created file: {file_path}")
         
         # Create zip file
-        zip_path = os.path.join(temp_dir, f"ImageCombiner_{download_id}.zip")
+        zip_name = f"ImageCombiner_{download_id}"
+        zip_path = os.path.join(temp_dir, f"{zip_name}.zip")
+        
+        logger.info(f"Creating zip file: {zip_path}")
         shutil.make_archive(zip_path.replace('.zip', ''), 'zip', package_dir)
+        
+        # Verify zip file was created
+        if not os.path.exists(zip_path):
+            raise Exception(f"Zip file was not created: {zip_path}")
+        
+        file_size = os.path.getsize(zip_path)
+        logger.info(f"Zip file created successfully, size: {file_size} bytes")
         
         # Store download info in memory
         downloads_db[download_id] = {
@@ -275,8 +289,10 @@ async def create_download_package(request: DownloadRequest):
             "name": request.name,
             "project_name": request.project_name,
             "zip_path": zip_path,
+            "temp_dir": temp_dir,  # Store for cleanup
             "created_at": time.time(),
-            "downloaded": False
+            "downloaded": False,
+            "file_size": file_size
         }
         
         logger.info(f"Created download package: {download_id}")
@@ -288,39 +304,94 @@ async def create_download_package(request: DownloadRequest):
         
     except Exception as e:
         logger.error(f"Error creating download package: {e}")
+        # Clean up temp directory if it was created
+        if 'temp_dir' in locals():
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
         raise HTTPException(status_code=500, detail=f"Failed to create download package: {str(e)}")
 
 @app.get("/api/download/{download_id}")
 async def download_package(download_id: str):
     """Download the ImageCombiner package."""
     try:
+        logger.info(f"Download requested for ID: {download_id}")
+        
         # Find download info
         if download_id not in downloads_db:
+            logger.error(f"Download ID not found: {download_id}")
             raise HTTPException(status_code=404, detail="Download not found")
         
         download_info = downloads_db[download_id]
         zip_path = download_info["zip_path"]
         
+        logger.info(f"Zip path: {zip_path}")
+        
         if not os.path.exists(zip_path):
+            logger.error(f"Zip file not found: {zip_path}")
             raise HTTPException(status_code=404, detail="Download file not found")
+        
+        # Check file size
+        file_size = os.path.getsize(zip_path)
+        if file_size == 0:
+            logger.error(f"Zip file is empty: {zip_path}")
+            raise HTTPException(status_code=500, detail="Download file is corrupted")
         
         # Mark as downloaded
         downloads_db[download_id]["downloaded"] = True
         downloads_db[download_id]["downloaded_at"] = time.time()
         
-        logger.info(f"Download started: {download_id}")
+        logger.info(f"Download started: {download_id}, file size: {file_size} bytes")
+        
+        # Return file with proper headers
+        headers = {
+            "Content-Disposition": f"attachment; filename=ImageCombiner_{download_id}.zip",
+            "Content-Type": "application/zip",
+            "Content-Length": str(file_size)
+        }
         
         return FileResponse(
             zip_path,
             media_type="application/zip",
-            filename=f"ImageCombiner_{download_id}.zip"
+            filename=f"ImageCombiner_{download_id}.zip",
+            headers=headers
         )
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error downloading package: {e}")
-        raise HTTPException(status_code=500, detail="Failed to download package")
+        raise HTTPException(status_code=500, detail=f"Failed to download package: {str(e)}")
+
+@app.get("/api/download/{download_id}/status")
+async def get_download_status(download_id: str):
+    """Get download status and info."""
+    try:
+        if download_id not in downloads_db:
+            raise HTTPException(status_code=404, detail="Download not found")
+        
+        download_info = downloads_db[download_id]
+        zip_path = download_info["zip_path"]
+        
+        status = {
+            "download_id": download_id,
+            "created_at": download_info["created_at"],
+            "downloaded": download_info.get("downloaded", False),
+            "file_exists": os.path.exists(zip_path),
+            "file_size": download_info.get("file_size", 0)
+        }
+        
+        if download_info.get("downloaded"):
+            status["downloaded_at"] = download_info.get("downloaded_at")
+        
+        return status
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting download status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get download status")
 
 @app.get("/api/stats")
 async def get_stats():
@@ -339,6 +410,41 @@ async def get_stats():
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve stats")
+
+@app.delete("/api/cleanup")
+async def cleanup_old_downloads():
+    """Clean up old download files (older than 1 hour)."""
+    try:
+        current_time = time.time()
+        cleanup_count = 0
+        
+        downloads_to_remove = []
+        for download_id, info in downloads_db.items():
+            # Clean up files older than 1 hour
+            if current_time - info["created_at"] > 3600:
+                temp_dir = info.get("temp_dir")
+                if temp_dir and os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir)
+                        cleanup_count += 1
+                        logger.info(f"Cleaned up temp directory: {temp_dir}")
+                    except Exception as e:
+                        logger.error(f"Failed to cleanup {temp_dir}: {e}")
+                
+                downloads_to_remove.append(download_id)
+        
+        # Remove from memory
+        for download_id in downloads_to_remove:
+            del downloads_db[download_id]
+        
+        return {
+            "cleaned_files": cleanup_count,
+            "removed_records": len(downloads_to_remove)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
+        raise HTTPException(status_code=500, detail="Failed to cleanup old downloads")
 
 # Health check endpoint
 @app.get("/health")
