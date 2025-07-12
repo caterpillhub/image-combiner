@@ -313,7 +313,7 @@ async def download_package(download_id: str):
         return FileResponse(
             zip_path,
             media_type="application/zip",
-            filename=f"ImagePack_{download_id}.zip"
+            filename=f"ImageCombiner_{download_id}.zip"
         )
         
     except HTTPException:
