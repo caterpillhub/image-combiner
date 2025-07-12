@@ -338,7 +338,7 @@ async def get_stats():
         
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get statistics")
+        raise HTTPException(status_code=500, detail="Failed to retrieve stats")
 
 # Health check endpoint
 @app.get("/health")
